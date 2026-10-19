@@ -131,6 +131,20 @@ local function CreateIconFrame()
     GameTooltip:Hide()
   end)
 
+  -- Make the icon movable by dragging the button (frame may be covered by the button texture)
+  btn:RegisterForDrag("LeftButton")
+  btn:SetScript("OnDragStart", function(self)
+    if InCombatLockdown() then return end
+    frame:StartMoving()
+  end)
+  btn:SetScript("OnDragStop", function(self)
+    if InCombatLockdown() then return end
+    frame:StopMovingOrSizing()
+    local point, _, relPoint, x, y = frame:GetPoint()
+    db.pos = { point = point, relPoint = relPoint, x = x, y = y }
+  end)
+
+  -- Keep frame-level drag handlers as a fallback
   frame:SetMovable(true)
   frame:EnableMouse(true)
   frame:RegisterForDrag("LeftButton")
@@ -378,6 +392,10 @@ SlashCmdList["BSREMINDER"] = function(msg)
 
   -- No-argument call opens the options panel
   if command == "" then
+    if not optionsPanel then
+      optionsPanel = CreateOptionsPanel()
+      if optionsPanel and optionsPanel.refresh then optionsPanel.refresh() end
+    end
     if optionsPanel then
       InterfaceOptionsFrame_OpenToCategory(optionsPanel)
       InterfaceOptionsFrame_OpenToCategory(optionsPanel)
@@ -397,6 +415,10 @@ SlashCmdList["BSREMINDER"] = function(msg)
   end
 
   if command == "config" or command == "options" or command == "o" then
+    if not optionsPanel then
+      optionsPanel = CreateOptionsPanel()
+      if optionsPanel and optionsPanel.refresh then optionsPanel.refresh() end
+    end
     if optionsPanel then
       InterfaceOptionsFrame_OpenToCategory(optionsPanel)
       InterfaceOptionsFrame_OpenToCategory(optionsPanel)
