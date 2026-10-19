@@ -1,0 +1,8 @@
+## Interface: 20506
+## Title: Battle Shout Reminder
+## Notes: Shows a movable icon in combat when Battle Shout is missing; click to cast.
+## Author: maelcreep
+## Version: 1.1
+## SavedVariables: BattleShoutReminderDB
+
+BattleShoutReminder.lua
