@@ -1,10 +1,63 @@
 -- BattleShoutReminder.lua
 local ADDON_NAME = "Battle Shout Reminder"
-local SPELL_ID = 2048 -- Battle Shout
+local BASE_SPELL_ID = 2048 -- one known Battle Shout id to use as fallback
+local SPELL_NAME = nil
+local SPELL_ID = nil
 local db
 
+local function FindBattleShoutInSpellbook()
+  -- Prefer to find the spell in the player's spellbook so we pick the correct rank/ID for this character/server.
+  local fallbackName = GetSpellInfo(BASE_SPELL_ID)
+
+  -- Iterate through spellbook entries (BOOKTYPE_SPELL) and look for a name that contains the localized fallback name.
+  if GetSpellBookItemName then
+    for i = 1, 255 do
+      local spellName = GetSpellBookItemName(i, BOOKTYPE_SPELL)
+      if not spellName then break end
+      -- Compare using plain find to avoid pattern magic; account for rank suffixes like "Battle Shout(Rank 1)" or localized variations
+      if fallbackName and type(spellName) == "string" and string.find(spellName, fallbackName, 1, true) then
+        SPELL_NAME = spellName
+        -- Try to resolve a numeric id for better cooldown/icon queries; GetSpellInfo accepts a name and may return an id as the 7th return
+        local _, _, _, _, _, _, id = GetSpellInfo(spellName)
+        if id and id > 0 then
+          SPELL_ID = id
+        end
+        return true
+      end
+      -- Also accept exact match by english name in case fallbackName is nil
+      if spellName == "Battle Shout" then
+        SPELL_NAME = spellName
+        local _, _, _, _, _, _, id = GetSpellInfo(spellName)
+        if id and id > 0 then SPELL_ID = id end
+        return true
+      end
+    end
+  end
+
+  -- If we didn't find it in the book, fall back to the known base id if it exists on this client
+  if fallbackName then
+    SPELL_NAME = fallbackName
+    SPELL_ID = BASE_SPELL_ID
+    return true
+  end
+
+  -- Nothing found
+  SPELL_NAME = nil
+  SPELL_ID = nil
+  return false
+end
+
 local function GetBattleShoutName()
-  return GetSpellInfo(SPELL_ID) or "Battle Shout"
+  if SPELL_NAME then return SPELL_NAME end
+  -- try to find it lazily
+  if FindBattleShoutInSpellbook() then
+    return SPELL_NAME
+  end
+  -- final fallback: attempt GetSpellInfo on BASE_SPELL_ID
+  local name = GetSpellInfo(BASE_SPELL_ID)
+  SPELL_NAME = name
+  SPELL_ID = BASE_SPELL_ID
+  return SPELL_NAME
 end
 
 local function InitDB()
@@ -21,30 +74,12 @@ local function InitDB()
 end
 
 local function IsBattleShoutKnown()
-  local _, class = UnitClass("player")
-  if class ~= "WARRIOR" and class ~= "Warrior" and class ~= "warrior" then
-    -- Some servers return localized class tokens — check by spell availability too
-    -- We'll still try to detect the spell by GetSpellInfo as a fallback
-    -- Continue to fallback checks below
-  end
-
-  -- Prefer checking the spell book if the API supports it
-  if IsSpellKnown and IsSpellKnown(SPELL_ID) then
+  -- If classOnly is disabled, allow the addon to be used regardless of class
+  -- We consider the spell known if we can find it in the spellbook or Resolve the fallback name
+  if FindBattleShoutInSpellbook() then
     return true
   end
-
-  local name = GetBattleShoutName()
-  if not name or name == "" then return false end
-
-  -- Check if we have the spell in our spellbook by name
-  for i = 1, 255 do
-    local spellName = GetSpellBookItemName and GetSpellBookItemName(i, BOOKTYPE_SPELL)
-    if not spellName then break end
-    if spellName == name then return true end
-  end
-
-  -- Last-resort: assume available if spell name exists
-  return true
+  return false
 end
 
 local function CreateIconFrame()
@@ -78,13 +113,18 @@ local function CreateIconFrame()
   local btn = CreateFrame("Button", "BattleShoutReminderButton", frame, "SecureActionButtonTemplate")
   btn:SetAllPoints(frame)
   btn:RegisterForClicks("AnyUp")
-  btn:SetAttribute("type", "spell")
-  btn:SetAttribute("spell", GetBattleShoutName())
+  -- We'll set the spell attribute below once we resolved the proper name
   frame.button = btn
 
   btn:SetScript("OnEnter", function(self)
     GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-    GameTooltip:SetSpellByID(SPELL_ID)
+    local id = SPELL_ID or BASE_SPELL_ID
+    if id then
+      GameTooltip:SetSpellByID(id)
+    else
+      local name = GetBattleShoutName()
+      if name then GameTooltip:SetSpellByName(name) end
+    end
     GameTooltip:Show()
   end)
   btn:SetScript("OnLeave", function()
@@ -138,16 +178,23 @@ local function UpdateIconTexture(frame)
   local spellName = GetBattleShoutName()
   if not spellName then return end
 
-  local tex = select(3, GetSpellInfo(SPELL_ID))
+  local tex
+  if SPELL_ID then
+    tex = select(3, GetSpellInfo(SPELL_ID))
+  else
+    tex = select(3, GetSpellInfo(spellName))
+  end
   if tex then
     frame.icon:SetTexture(tex)
   end
 
   if frame.button then
+    -- Use the localized name if we have it; SecureActionButton accepts a spell name
+    frame.button:SetAttribute("type", "spell")
     frame.button:SetAttribute("spell", spellName)
   end
 
-  local start, duration = GetSpellCooldown(SPELL_ID)
+  local start, duration = GetSpellCooldown(SPELL_ID or spellName)
   if duration and duration > 1.5 then
     frame.cooldown:SetCooldown(start, duration)
   else
@@ -173,20 +220,16 @@ local function ShouldShowReminder()
     return false
   end
 
-  local hasBuff = UnitBuff("player", spellName)
-  return not hasBuff
-end
-
-local function UpdateVisibility()
-  local frame = CreateIconFrame()
-  UpdateFrameAppearance(frame)
-  UpdateIconTexture(frame)
-
-  if ShouldShowReminder() then
-    frame:Show()
-  else
-    frame:Hide()
+  -- Check all buffs on the player; allow partial matches so ranks won't break detection
+  for i = 1, 40 do
+    local buffName = UnitBuff("player", i)
+    if not buffName then break end
+    if buffName == spellName or (type(buffName) == "string" and string.find(buffName, spellName, 1, true)) then
+      return false -- buff present
+    end
   end
+
+  return true -- no matching buff found
 end
 
 -- Interface Options panel
@@ -207,7 +250,6 @@ local function CreateOptionsPanel()
   enabledBox.Text:SetText("Enable reminder")
   enabledBox:SetScript("OnClick", function(self)
     db.enabled = self:GetChecked()
-    UpdateVisibility()
   end)
 
   local classOnlyBox = CreateFrame("CheckButton", "BattleShoutReminderOptionsClassOnly", panel, "OptionsCheckButtonTemplate")
@@ -215,7 +257,6 @@ local function CreateOptionsPanel()
   classOnlyBox.Text:SetText("Only show for Warrior / spell available")
   classOnlyBox:SetScript("OnClick", function(self)
     db.classOnly = self:GetChecked()
-    UpdateVisibility()
   end)
 
   local resetPosButton = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
@@ -273,7 +314,6 @@ local function CreateOptionsPanel()
     db.alpha = 1.0
     db.pos = nil
     panel.refresh()
-    UpdateVisibility()
   end
 
   InterfaceOptions_AddCategory(panel)
@@ -281,6 +321,18 @@ local function CreateOptionsPanel()
 end
 
 local optionsPanel = nil
+
+local function UpdateVisibility()
+  local frame = CreateIconFrame()
+  UpdateFrameAppearance(frame)
+  UpdateIconTexture(frame)
+
+  if ShouldShowReminder() then
+    frame:Show()
+  else
+    frame:Hide()
+  end
+end
 
 local eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("PLAYER_LOGIN")
@@ -291,6 +343,9 @@ eventFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
 eventFrame:SetScript("OnEvent", function(self, event, ...)
   if event == "PLAYER_LOGIN" then
     InitDB()
+    -- Resolve the spell name/id early so the button/tooltip are correct
+    FindBattleShoutInSpellbook()
+
     local frame = CreateIconFrame()
     if db.pos then
       RestorePosition(frame)
@@ -299,7 +354,7 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
     optionsPanel = CreateOptionsPanel()
     optionsPanel.refresh()
     print("|cFF33FF99" .. ADDON_NAME .. "|r loaded.")
-    print("Use /bsreminder to toggle, /bsreminder config to open options.")
+    print("Use /bsreminder to open options, /bsreminder toggle to enable/disable.")
     return
   end
 
@@ -320,6 +375,17 @@ SLASH_BSREMINDER1 = "/bsreminder"
 SLASH_BSREMINDER2 = "/bsr"
 SlashCmdList["BSREMINDER"] = function(msg)
   local command = string.lower((msg or ""))
+
+  -- No-argument call opens the options panel
+  if command == "" then
+    if optionsPanel then
+      InterfaceOptionsFrame_OpenToCategory(optionsPanel)
+      InterfaceOptionsFrame_OpenToCategory(optionsPanel)
+    else
+      print(ADDON_NAME .. ": options not available yet (try /reload).")
+    end
+    return
+  end
 
   if command == "toggle" or command == "t" then
     if db then
@@ -349,7 +415,8 @@ SlashCmdList["BSREMINDER"] = function(msg)
   end
 
   print(ADDON_NAME .. " commands:")
-  print("/bsreminder toggle   - enable/disable the reminder")
-  print("/bsreminder config   - open addon options")
-  print("/bsreminder reset    - reset icon position")
+  print("/bsreminder <enter>   - open addon options")
+  print("/bsreminder toggle    - enable/disable the reminder")
+  print("/bsreminder config    - open addon options")
+  print("/bsreminder reset     - reset icon position")
 end
